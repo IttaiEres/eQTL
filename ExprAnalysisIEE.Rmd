@@ -1,0 +1,559 @@
+---
+title: "ShowTissueSpecificPatterns"
+output: html_document
+---
+
+```{r Necessities of loading the data from Sarah and Gao}
+setwd("~/Desktop/eQTL")
+library('qtlcharts')
+data=read.csv("./Data/AvgExpr.csv",header = T) #Reads in the data. Rows of genes, columns of tissues.
+rownames(data)=data[,1] #Sets the row names for the data as the first column (gene names).
+expr.data=data[,-1] #Subsets minus the first column now, since the rows have already been named.
+###original input statistics##
+
+maxz=read.table("./Data/maxz.txt")
+qtl.names=sapply(1:length(rownames(maxz)),function(x){unlist(strsplit(rownames(maxz)[x], "[_]"))[[1]]})
+expr.sort=expr.data[rownames(expr.data)%in%qtl.names,]
+###significance statistics
+lfsr=read.table("./Data/Aug13withEDlfsr.txt")[,-1]
+
+##effect size estimates (posterior means are means of the E(B|Data))
+pmash=read.table("./Data/Aug13withEDposterior.means.txt")[,-1]
+
+
+colnames(lfsr)=colnames(pmash)=colnames(maxz)
+rownames(lfsr)=rownames(pmash)=rownames(maxz)
+
+a=match(qtl.names,rownames(expr.sort))###in order to make sure the gene names are the same in both
+
+
+expr.sort=expr.sort[a,]
+```
+
+```{r IEE Analysis--extraction of tissue-specific eQTL}
+#First, remove all tissues I doubt I'll care about.
+colnames(pmash) #I'll keep LCLs [18], Fibroblasts [19], both heart options [25-26], liver [27], and both skin options [35-36]. Because of the similarity between the two heart options, and between the two skin options, I'll need to make some separate matrices to look for tissue-specific eQTL in those tissues, excluding the other each time. This makes 4 different matrices in total:
+
+atrial.skin.not.exposed <- c(18, 19, 25, 27, 35)
+atrial.skin.exposed <- c(18, 19, 25, 27, 36)
+ventricle.skin.not.exposed <- c(18, 19, 26, 27, 35)
+ventricle.skin.exposed <- c(18, 19, 26, 27, 36)
+which(sum(lfsr[,atrial.skin.not.exposed]<0.05)==1)
+which(lfsr[,atrial.skin.not.exposed]<0.05)
+
+#Function to extract single-tissue eQTL from an lfsr matrix, on only a subset of the tissues.
+single.tissue.eQTLs <- function(desired.tissues, lfsr.threshold=0.05, lfsr.matrix=lfsr){
+  final.mat <- matrix(NA, ncol = 2)
+  colnames(final.mat) <- c("Gene", "Tissue")
+  for(row in 1:nrow(lfsr.matrix)){
+    if(sum(lfsr.matrix[row, desired.tissues]<=lfsr.threshold)==1){
+      final.mat <- rbind(final.mat, c(rownames(lfsr.matrix[row,]), colnames(lfsr.matrix[desired.tissues[which(lfsr.matrix[row, desired.tissues]<=lfsr.threshold)]])))
+    }
+  }
+  return(final.mat[-1,])
+}
+
+#Calling to find tissue-specific eQTL in each of the tissue subgroupings.
+atrial.skin.not.exposed.eQTLs <- single.tissue.eQTLs(atrial.skin.not.exposed)
+atrial.skin.exposed.eQTLs <- single.tissue.eQTLs(atrial.skin.exposed)
+ventricle.skin.not.exposed.eQTLs <- single.tissue.eQTLs(ventricle.skin.not.exposed)
+ventricle.skin.exposed.eQTLs <- single.tissue.eQTLs(ventricle.skin.exposed)
+
+#Binding them all together and removing duplicates, leaving me with only the tissue-specific eQTL.
+tissue.specific.eQTLs <- rbind(atrial.skin.not.exposed.eQTLs, atrial.skin.exposed.eQTLs, ventricle.skin.exposed.eQTLs, ventricle.skin.not.exposed.eQTLs)
+tissue.specific.eQTLs <- unique(tissue.specific.eQTLs) #Extracted all of the genes that have significant lfsr in only one of the desired tissues (or in both types of that tissue).
+ rownames(tissue.specific.eQTLs) <- tissue.specific.eQTLs[,1] #Name the rows to make things easier on the lonely.strong.eQTL function!
+
+#Function that finds tissue-specific eQTL from my previously made list with strong effect size, by indexing into the pmash beta matrix to check their beta in that tissue.
+lonely.strong.eQTL <- function(lonely.eQTLs, β.matrix, β.strong){
+  final.mat <- matrix(NA, ncol = 2, nrow = nrow(lonely.eQTLs))
+  colnames(final.mat) <- c("Tissue", "Effect Size")
+  rownames(final.mat) <- rownames(lonely.eQTLs)
+  for(eQTL in rownames(lonely.eQTLs)){#1:nrow(lonely.eQTLs)){
+    if(abs(β.matrix[eQTL, lonely.eQTLs[eQTL, 2]])>=β.strong){ #Index into the pmash matrix, find the beta--don't care about sign.
+      final.mat[eQTL,] <- c(lonely.eQTLs[eQTL, 2], β.matrix[eQTL, lonely.eQTLs[eQTL, 2]]) #Add tissue and effect size to final matrix!
+      #final.mat <- rbind(final.mat, c(lonely.eQTLs[eQTL, 1], lonely.eQTLs[eQTL, 2], β.matrix[lonely.eQTLs[eQTL, 1], lonely.eQTLs[eQTL, 2]]))
+    }
+  }
+  #final.mat <- final.mat[-1,]
+  #rownames(final.mat) <- final.mat[,1]
+  #return(final.mat[,-1])
+  remove.them <- as.numeric(which(is.na(final.mat[,1]))) #Remove the genes that did not have strong enough betas.
+  return(final.mat[-remove.them,])
+}
+
+
+loose <- lonely.strong.eQTL(tissue.specific.eQTLs, pmash, 1)
+test.gene <- "ENSG00000177963.8_11_246370_C_T_b37" #A TSeQTL in Heart Left Ventricle.
+
+grep_prep <- function(gene_list){ #Create a useable bash script to subset down the GTEx data to only genes that 
+  for(gene in gene_list){
+    gene <- unlist(strsplit(gene, "_"))[1]
+    temp <- (paste("zgrep", gene, "../../../project/mstephens/data/external_public_supp/GTEx/V6/GTEx_Analysis_v6_RNA-seq_RNA-SeQCv1.1.8_gene_rpkm.gct.gz >> TSeQTLgenes.txt"))
+    write.table(temp, file="all_TS_eQTL_genes_bash.sh", row.names=FALSE, col.names=FALSE, quote=FALSE, append=TRUE)
+  }
+}
+
+grep_prep(rownames(tissue.specific.eQTLs))
+
+sample_attributes=read.delim("~/Desktop/eQTL/GTEx_Data_V6_Annotations_SampleAttributesDS.txt",sep="\t")
+#test=read.table("~/Desktop/eQTL/GTEx_Analysis_v6_RNA-seq_RNA-SeQCv1.1.8_gene_rpkm.gct.gz",header=TRUE,skip = 2)
+#test=read.table("~/Desktop/eQTL/Data1/1000genes.txt", header=TRUE, skip=2)
+#real.test <- read.table("~/Desktop/GTEx_Analysis_v6_RNA-seq_RNA-SeQCv1.1.8_gene_rpkm.gct.gz", header=TRUE, skip=2)
+omega <- read.table("~/Desktop/TSeQTLgenes.txt", header=TRUE, skip=2)
+library(reshape2)
+y <- melt(omega)
+#x <- melt(real.test)
+
+y$variable <- gsub("\\.", "-", y$variable) #Changes the variable names to match the ones on the sample attributes table (just changing .s to -s)
+final.table <- merge(y, sample_attributes, by.x="variable", by.y="SAMPID") #Merges to create the final table. Unfortunately, there are definitely repeats in this table, which might explain some of the weird results I obtained early on with my expression extractor.
+ULTIMATE.TABLE <- unique(final.table) #This should have half the number of rows as final.table, if this worked right!
+
+my.genes <- c("ENSG00000182247.5", "ENSG00000177963.8", "ENSG00000240849.6", "ENSG00000166923.6", "ENSG00000124107.5", "ENSG00000028839.5", "ENSG00000177791.11")
+my.tissues <- c("Cells - EBV-transformed lymphocytes", "Cells - Transformed fibroblasts", "Heart - Atrial Appendage", "Heart - Left Ventricle", "Liver", "Skin - Sun Exposed (Lower leg)", "Skin - Not Sun Exposed (Suprapubic)")
+
+#Liver test for ENSG00000166923.6:
+inliver <- expression.extractor("ENSG00000166923.6", "Liver")
+inheart <- expression.extractor("ENSG00000166923.6", "Heart - Atrial Appendage")
+inLCLs <- expression.extractor("ENSG00000166923.6", "Cells - EBV-transformed lymphocytes")
+inLV <- expression.extractor("ENSG00000166923.6", "Heart - Left Ventricle")
+
+#x <- x[genes]
+#x$variable <- gsub("\\.", "-", x$variable) Pretty irrelevant for what I want...impt for merging below though
+#merged.by.sample=merge(x, sample_attributes, by.x = "variable", by.y = "SAMPID")
+
+
+
+expression.extractor <- function(gene, tissue, matrix=final.table){
+  gene.rows <- which(matrix$Name==gene) #Find all the rows with the gene of interest.
+  temp.mat <- matrix[gene.rows,] #Subset the matrix down to only those rows.
+  tissue.rows <- which(temp.mat$SMTSD==tissue) #SMTSD is column w/ tissues. Find all the rows in that subset matrix containing the tissue of interest.
+  temp.mat <- temp.mat[tissue.rows,] #Subset the matrix down to only the rows with the gene and tissue of interest.
+  return(temp.mat$value) #Returns all the expression values for the given gene in the given tissue.
+}
+
+final.DE.checker <- function(gene, tissue.of.interest){
+  tissues <- c("Cells - EBV-transformed lymphocytes", "Cells - Transformed fibroblasts", "Heart - Atrial Appendage", "Heart - Left Ventricle", "Liver", "Skin - Sun Exposed (Lower leg)", "Skin - Not Sun Exposed (Suprapubic)")
+  tissues <- tissues[-which(tissues==tissue.of.interest)]
+  final.mat <- matrix(NA, nrow=1, ncol=length(tissues)+1)
+  rownames(final.mat) <- gene
+  colnames(final.mat) <- c(tissue.of.interest, tissues)
+  impt.tissue.expression <- expression.extractor(gene, tissue.of.interest)
+  for(tissue in tissues){
+    tmp.expression <- expression.extractor(gene, tissue)
+    final.mat[gene, tissue] <- t.test(impt.tissue.expression, tmp.expression, var.equal=TRUE)$p.val
+  }
+  return(final.mat)
+}
+
+# my.genes <- c("ENSG00000182247.5", "ENSG00000177963.8", "ENSG00000240849.6", "ENSG00000166923.6", "ENSG00000124107.5", "ENSG00000028839.5", "ENSG00000177791.11")
+# 
+# test1 <- final.DE.checker("ENSG00000182247.5", "Skin - Sun Exposed (Lower leg)")
+# final.DE.checker("ENSG00000182247.5", "Skin - Not Sun Exposed (Suprapubic)")
+# 
+# final.DE.checker("ENSG00000177963.8", "Heart - Atrial Appendage")
+# final.DE.checker("ENSG00000177963.8", "Heart - Left Ventricle")
+# 
+# final.DE.checker("ENSG00000240849.6", "Skin - Sun Exposed (Lower leg)")
+# final.DE.checker("ENSG00000240849.6", "Skin - Not Sun Exposed (Suprapubic)")
+# 
+# final.DE.checker("ENSG00000166923.6", "Liver")
+# 
+# final.DE.checker("ENSG00000124107.5", "Skin - Sun Exposed (Lower leg)")
+# final.DE.checker("ENSG00000124107.5", "Skin - Not Sun Exposed (Suprapubic)")
+# 
+# final.DE.checker("ENSG00000028839.5", "Heart - Atrial Appendage")
+# final.DE.checker("ENSG00000028839.5", "Heart - Left Ventricle")
+# 
+# final.DE.checker("ENSG00000177791.11", "Heart - Atrial Appendage")
+```
+
+```{r IEE Analysis--checking for DE b/t tissues in TSeQTL}
+#Loading data on average expressions and standard errors of each of the genes across all tissues.
+expression.values <- read.csv("./Gao/ExprAvg.csv.gz", header=T)
+expression.SEs <- read.csv("./Gao/ExprSE.csv.gz", header=T) #These are effectively sample standard deviations (within a given tissue).
+expression.Ns <- read.csv("./Gao/ExprSampleSize.csv.gz", header=T)
+#These each have 56318 rows, indicating 56318 genes. If I look at Sarah's other file, the raw expression data matrix has 481800490 rows, and if I divide that by 56318, I get 8555--the number of individuals, I presume? (NO, it's # of samples--since not every row in that raw expression data matrix is unique to a single gene, but rather to a gene and a tissue)
+
+#Set the rownames for each of these matrices as the genes they correspond to.
+rownames(expression.Ns) <- expression.Ns[,1]
+rownames(expression.values) <- expression.values[,1]
+rownames(expression.SEs) <- expression.SEs[,1]
+
+#Unfortunately, this data has more tissues than my initial data, so I need to find the appropriate indices to subset into again. I was interested in LCLs [23], Fibroblasts [24], both heart options [33-34], liver [36], and both skin options [45-46]
+desired.tissues <- c(23, 24, 33, 34, 36, 45, 46)
+
+#I'll subset each of the new matrices I just made to only these columns, to save energy/computational time.
+expression.values <- expression.values[,desired.tissues]
+expression.SEs <- expression.SEs[,desired.tissues]
+expression.Ns <- expression.Ns[,desired.tissues]
+
+#I rename the columns of these matrices to match the colnames from the other files used, to make the pipeline smoother.
+colnames(expression.values) <- c("Cells_EBV.transformed_lymphocytes", "Cells_Transformed_fibroblasts", "Heart_Atrial_Appendage", "Heart_Left_Ventricle", "Liver", "Skin_Not_Sun_Exposed_Suprapubic", "Skin_Sun_Exposed_Lower_leg")
+colnames(expression.SEs) <- c("Cells_EBV.transformed_lymphocytes", "Cells_Transformed_fibroblasts", "Heart_Atrial_Appendage", "Heart_Left_Ventricle", "Liver", "Skin_Not_Sun_Exposed_Suprapubic", "Skin_Sun_Exposed_Lower_leg")
+colnames(expression.Ns) <- c("Cells_EBV.transformed_lymphocytes", "Cells_Transformed_fibroblasts", "Heart_Atrial_Appendage", "Heart_Left_Ventricle", "Liver", "Skin_Not_Sun_Exposed_Suprapubic", "Skin_Sun_Exposed_Lower_leg")
+
+#Function to take a list of genes that the lonely.strong.eQTL function outputs, and check if they're DE as compared to the other relevant tissues.
+DE.checker <- function(tissue.specific.eQTL.table, mean.expression=expression.values, sd.expression=expression.SEs, n.expression=expression.Ns){
+  final.list=vector(mode="list", length=length(rownames(tissue.specific.eQTL.table))) #Initialize a list to store all this stuff later on.
+  for(gene in rownames(tissue.specific.eQTL.table)){
+    this.gene <- unlist(strsplit(gene, split="_"))[1] #Get the name of the gene changed to match the short version.
+    this.tissue <- tissue.specific.eQTL.table[gene, 1] #What's the specific tissue we're looking at here?
+    n1 <- n.expression[this.gene, this.tissue] #Sample size for this gene and this tissue?
+    mu1 <- mean.expression[this.gene, this.tissue] #Mean expression value for this gene and tissue.
+    sd1 <- sd.expression[this.gene, this.tissue] #S.D. value for this gene and tissue.
+    other.tissues <- colnames(expression.values)[-(which(colnames(expression.values)==this.tissue))] #What are the other tissues of interest to examine?
+    insig.DE <- NULL #Initialize a blank vector to store tissues not DE.
+    sig.DE <- NULL #Initialize a blank vector to store tissues that show DE.
+    for(other.tissue in other.tissues){ #Iterate through those other tissues.
+      n2 <- n.expression[this.gene, other.tissue]
+      mu2 <- mean.expression[this.gene, other.tissue]
+      sd2 <- sd.expression[this.gene, other.tissue]
+      t.stat <- (mu1-mu2)/(sqrt((((n1-1)*sd1^2)+((n2-1)*sd2^2))/(n1+n2-2))*sqrt(1/n1 + 1/n2)) #Calculating the actual t statistic.
+      if((2*pt(t.stat, n1+n2-2, lower.tail=FALSE))>0.05){#When there is NOT differential expression. This was totally fucked up at first because I forgot to use lower.tail=FALSE, and because I forgot to multiply by 2 (this is a 2-sided hypothesis test)
+        insig.DE <- c(insig.DE, other.tissue)
+      }
+      #else if(pt(t.stat, n1+n2-2)<=0.05){#When there IS differential expression.
+      #  sig.DE <- c(sig.DE, other.tissue)
+      #}
+      #else{print("WTF?")} #There should never be another scenario, but just in case...
+    }
+    final.list[[paste(this.gene, "is specific to", this.tissue, "; tissues where it's not DE:")]] <-insig.DE
+    #final.mat[gene, 1] <- this.tissue #Indicates on the final matrix which tissue this eQTL is specific to.
+    #final.mat[gene, 2] <- c(insig.DE) #Indicates on the final matrix which other tissues don't have DE for this gene. Right now this won't work--seems I have to make this whole "final.mat" into a list instead of a matrix for this to work.
+    #final.mat[gene, 3] <- c(sig.DE) #Indicates on the final matrix which other tissues ARE DE for this gene.
+  }
+  return(final.list)
+}
+
+test <- DE.checker(loose)
+
+#The shit I actually care about!
+
+### In Skin_sun_exposed_lower_leg:
+#ENSG00000182247.5 (rs9826624: UBE2E2, assoc. w/ motion sickness, sever acne, T2D, atypical psychosis), Z-stat ~11
+#ENSG00000240849.6 (rs199660606 intron variant in LOC101927512: TMEM189, PSORIASIS!!!)
+#ENSG00000124107.5 (rs3761193 intron variant in LOC105372630, assoc. w/ PSORIASIS: SLPI, PSORIASIS)
+
+### In Heart_Left_Ventricle:
+#ENSG00000177963.8(rs12801133 in an intron of PSMD13, a gene associated with age of onset of menarche, circulating platelet count, bone mineral density, & intracranial aneurysm: RIC8A, same associations; also in Heart_atrial_appendage)
+#ENSG00000028839.5 (rs9493777 in an intron of TBPL1, a gene that has had hits associated with coronary artery disease: TBPL1, coronary artery disease, large artery stroke, ischemic stroke, coronary heart disease)
+
+### In Heart_atrial_appendage:
+
+### In liver:
+#ENSG00000166923.6 (rs11071915: GREM1 assoc. w/ colorectal cancer, hypospadias (penis opening on underside rather than the tip?!), bladder cancer)
+
+
+#Genes of interest:
+#ENSG00000237037.5(rs34385013 in coding region of CYP2D6, associated with a variety of mental disorders: NDUFA6 assoc. w/ schizophrenia, response to serotonin reuptake inhibitors in major depressive disorder (plasma drug and metabolite levels), and cognitive function), ENSG00000166923.6(rs11071915: GREM1 assoc. w/ colorectal cancer, hypospadias (penis opening on underside rather than the tip?!), bladder cancer), ENSG00000175898.4 (:CTD-2369P2.2, nothing)--specific to liver
+
+#ENSG00000067596.6 (rs12451473, an intronic variant in ARL4D: DHX8), ENSG00000115590.9 (rs33964533 intron variant in IL1R2, assoc. with androgen levels, depression, and ADHD), ENSG00000182247.5 (rs9826624: UBE2E2, assoc. w/ motion sickness, sever acne, T2D, atypical psychosis), ENSG00000182600.5 (rs812383 intron variant in C2orf82, assoc. with anxiety, depression, and ADHD), ENSG00000186635.10 (rs57614870 intron variant in ARAP1, assoc. w/ BMI, bipolar disorder, BMI in chronic obstructive pulmonary disease: ARAP1), ENSG00000105173.9 (rs3218036 intron variant in CCNE1, assoc. w/ BMI and bladder cancer: CCNE1, assoc. w/ BMI and bladder cancer), ENSG00000039560.9 (rs465697), ENSG00000105357.11 (rs12981844 in MYH14, assoc. w/ disc degeneration and glucose homeostasis), ENSG00000110330.4 (rs2846857), ENSG00000124107.5 (rs3761193 intron variant in LOC105372630, assoc. w/ PSORIASIS: SLPI, PSORIASIS), ENSG00000139324.7 (rs2468222 intron variant in CEP290, assoc. w/ cloazpine-induced agranulocytosis, trans fatty acid levels), ENSG00000144674.12 (rs6809976),  ENSG00000162747.5 (rs61801824 intron variant in NR_047648.1), ENSG00000169951.5 (rs117910240: ZNF764, assoc. w/ smooth-surface caries, ulcerative colitis, systemic lupus erythematosus), ENSG00000171241.4(rs808783 intron variant in C16orf87), ENSG00000240849.6 (rs199660606 intron variant in LOC101927512: TMEM189, PSORIASIS!!!), ENSG00000256007.1(rs57614870 intron variant in ARAP1), ENSG00000267815.1 (rs12981844 intron variant in MYH14)--specific to skin_sun_exposed_lower_leg
+
+#ENSG00000177963.8(rs12801133 in an intron of PSMD13, a gene associated with age of onset of menarche, circulating platelet count, bone mineral density, & intracranial aneurysm: RIC8A, same associations), ENSG00000028839.5 (rs9493777 in an intron of TBPL1, a gene that has had hits associated with coronary artery disease: TBPL1, coronary artery disease, large artery stroke, ischemic stroke, coronary heart disease), ENSG00000151327.8 (rs80338392 in an intron of FAM177A1: FAM177A1), ENSG00000158104.7 (rs10840622 in an intron of HPD, a gene with some associations to blood metabolites: HPD), ENSG00000183309.7 (rs7002650 in NAPRT1, a gene with association to ADHD: ZNF623, assoc/ w/ ADHD, obesity-related traits, retinal detachment), ENSG00000139725.3_12_122225225_T_C_b37 (rs7308123, intron variant in RHOF, assoc. w/ a variety of obesity-related traits: RHOF),  --specific to heart left ventricle
+
+#ENSG00000147408.10_8_19555762_T_C_b37 (rs10090551, intron variant in CSGALNACT1, assoc. w/ educational attainment, response to antidepressants, acute lymphoblastic leukemia: CSGALNACT1), ENSG00000150403.13_13_114192125_A_G_b37 (rs2259573, intron variant in TMCO3: TMCO3), ENSG00000151327.8 (rs80338392: FAM177A1), ENSG00000151779.8 (rs202067706: NBAS, assoc. w/ recalcitrant atopic dermatitis, wilms tumor, response to platinum-based chemo, conduct disorder), ENSG00000158104.7 (rs10840622: HPD assoc. w/ blood metabolite levels, urinary metabolites, mean platelet volume, platelet count, obesity-related traits), ENSG00000165097.9 (rs34969716: KDM1B), ENSG00000176293.15(:ZNF135, nothing), ENSG00000177791.11 (:MYOZ1, associated with atrial fibrillation!!!), ENSG00000177963.8 (:RIC8A), ENSG00000183309.7(:ZNF623, retinal detachment, obesity-related traits, ADHD)--specific to heart atrial appendage
+
+#ENSG00000162747.5 (:FCGR3B, chronic bronchitis in chronic obstructive pulmonary disease, inflammatory bowel disease, lipid metabolism phenotypes), ENSG00000165219.17 (:GAPVD1), ENSG00000166483.6 (:WEE1), ENSG00000167721.6 (:TSR1, schoziphrenia, metabolite levels in CSF, esophageal cancer, proinsulin levels), ENSG00000182247.5(:UBE2E2, assoc. w/ motion sickness, sever acne, T2D, atypical psychosis), ENSG00000182600.5 (:C2orf82, assoc. with anxiety, depression, and ADHD), ENSG00000182676.4 (:PPP1R27, nothing), ENSG00000183655.11(:KLHL25, assoc. w/ adverse response to chemo in breast cancer--alopecia, psychosis, and aging traits)--specific to Skin_Not_Sun_Exposed_Suprapubic
+
+#ENSG00000104427.7(rs5892661, in an intron of IL7: ZC2HC1A, nothing), ENSG00000169193.7(rs71526018 in an intron of CCDC126:CCDC126)--specific to LCLs
+
+#To actually look into them...I used just a normal find on the text file itself (seemed faster than GREPing!)
+
+
+reference.table <- read.table("GTEx_Analysis_v6_OMNI_genot_1KG_imputed_var_chr1to22_info4_maf01_CR95_CHR_POSb37_ID_REF_ALT.txt.gz", header=T)
+grep("8_11_246370_C_T_b37", reference.table)
+
+#Cases where the gene is expressed more highly in a tissue where it doesn't have the eQTL? Just start by checking for DE first and see if I have enough...can deal with this later if it comes up a lot and I have this issue.
+  
+#Gao is sending me the sample sizes, so I need to take the SEs he gave me here (which are actually SDs?) and divide by the square root of the sample size to get standard error of the mean, SEM. Luckily, he is already doing that calculation and sending it to me so I can have SEMs for each gene and each tissue.
+  
+#I can use a standard two-sample t-test, because the variance across individuals for a given tissue should be comparable across different tissues.
+
+#What I'll want to do with the "x" table from the other markdown file is something like which(x[,1]=="GENE_NAME")
+
+grep("ENSG00000177963.8", expression.values[,1])
+expression.values[30046, desired.tissues]
+expression.SEs[30046, desired.tissues]
+max(expression.values[30046,desired.tissues])
+
+expression.values["ENSG00000177963.8", "Heart...Left.Ventricle"]
+expression.Ns["ENSG00000177963.8", desired.tissues]
+```
+
+```{r Genomics and Systems Biology}
+#Make 6 groups of paper presenters for genomics, sprinkling undergrads throughout:
+
+group1 <- c("Liana Hernandez", "Scott Zhang", "Charles Washington", "Miles Richardson" )
+group2 <- c("Wanhao Chi", "Katie Rhodes", "Kyle Delaney", "Remy Lee")
+group3 <- c("Brandon Mapes", "Jaime Chao", "Matthew Sullivan", "Daniel Muratore")
+group4 <- c("Manny Vazquez", "Arjun Biddanda", "Aditya Rao", "Hannah Weller")
+group5 <- c("Roy Morgan", "Kevin Magnaye", "Lev Tsypin", "Aminah Sallam")
+group6 <- c("Andrew Tremain", "Olivia Gray", "Joe Marcus", "Rania Garde", "Alanna Gary")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Check to see if the QTLs have expression values that are tissue-specific.
+
+```{r, cache=TRUE,echo=FALSE}
+setwd("~/Desktop/eQTL")
+library('qtlcharts')
+data=read.csv("./Data/AvgExpr.csv",header = T) #Reads in the data. Rows of genes, columns of tissues.
+rownames(data)=data[,1] #Sets the row names for the data as the first column (gene names).
+expr.data=data[,-1] #Subsets minus the first column now, since the rows have already been named.
+###original input statistics##
+
+maxz=read.table("./Data/maxz.txt")
+qtl.names=sapply(1:length(rownames(maxz)),function(x){unlist(strsplit(rownames(maxz)[x], "[_]"))[[1]]})
+expr.sort=expr.data[rownames(expr.data)%in%qtl.names,]
+###significance statistics
+lfsr=read.table("./Data/Aug13withEDlfsr.txt")[,-1]
+
+##effect size estimates (posterior means are means of the E(B|Data))
+pmash=read.table("./Data/Aug13withEDposterior.means.txt")[,-1]
+
+
+colnames(lfsr)=colnames(pmash)=colnames(maxz)
+rownames(lfsr)=rownames(pmash)=rownames(maxz)
+
+a=match(qtl.names,rownames(expr.sort))###in order to make sure the gene names are the same in both
+
+
+expr.sort=expr.sort[a,]
+
+head(rownames(expr.sort))[1:5]
+head(rownames(lfsr))[1:5]
+missing.tissues=c(7,8,19,20,24,25,31,34,37)#, 36, 40, 42, 43, 51, 52) #After 37, I added in other tissues I don't think we could diff. to.
+exp.sort=expr.sort[,-missing.tissues]
+colnames(exp.sort)=colnames(maxz)
+
+#Curve data here should be Z-stat/posterior Z
+plot_tissuespecific = function(tissuename,lfsr,curvedata,title,thresh=0.05,subset=1:44){
+  index_tissue=which(colnames(lfsr) %in% tissuename);
+  ybar=title
+  ##create a matrix showing whether or not lfsr satisfies threshold
+  sigmat = lfsr <= thresh;
+  sigs=which(rowSums(sigmat[,index_tissue,drop=FALSE])==length(tissuename) & rowSums(sigmat[,-index_tissue,drop=FALSE])==0)
+  #sigs.it=which(lfsr[sigs,index_tissue]<thresh)
+  iplotCurves(curvedata[sigs,subset],chartOpts=list(curves_xlab="Tissue",curves_ylab=ybar))
+}  
+
+bar_example=function(gene.name,expr.sort)
+  {
+  index=which(rownames(expr.sort)==gene.name)
+  barplot(as.matrix(expr.sort[index,]),las=2,main=gene.name)
+  }
+```
+
+Check testis: 
+```{r}
+plot_tissuespecific("Testis",lfsr,log(exp.sort),"log(exp.sort)",thresh=0.05,subset=1:44)
+```
+
+Show that they are eQTL:
+```{r}
+plot_tissuespecific("Testis",lfsr,pmash,"eQTLEffect",thresh=0.05,subset=1:44)
+```
+
+Check Whole Blood
+```{r}
+
+plot_tissuespecific("Whole_Blood",lfsr,log(exp.sort),"log(exp.sort)",thresh=0.05,subset=1:44)
+```
+
+
+QTLplot
+```{r}
+plot_tissuespecific("Whole_Blood",lfsr,pmash,"eQTLEffect",thresh=0.05,subset=1:44)
+```
+I am not seeing evidence of tissue specific expression.
+
+##Check for our select examples:
+
+```{r, whole.blood,cache=T}
+
+gene.name="ENSG00000120029.8"
+bar_example(gene.name,expr.sort)
+
+gene.name="ENSG00000078114.14"
+bar_example(gene.name,expr.sort)
+```
+
+Testis qualitative:
+
+
+```{r, testis,cache=T}
+
+gene.name="ENSG00000059588.5"
+bar_example(gene.name,expr.sort)
+```
+
+So tissue-specificitiy in expression is the exception not the rule, and our examples are good.
+
+```{r}
+gene.name="ENSG00000253641.1"
+bar_example(gene.name, expr.sort)
+
+
+#Example of a gene with a strong eQTL only in testis, but which is comparably expressed between testis and Brain_Cerebellar_Hemisphere, as well as Brain_Cerebellum
+grep("ENSG00000253641.1", rownames(pmash))
+pmash[13995,]
+exp.sort["ENSG00000253641.1",]
+```
+
+```{r Garbage}
+#First, remove all tissues I doubt I'll care about.
+colnames(pmash) #I'll keep LCLs [18], Fibroblasts [19], both heart options [25-26], liver [27], and both skin options [35-36]. Because of the similarity between the two heart options, and between the two skin options, I'll need to make some separate matrices to look for tissue-specific eQTL in those tissues, excluding the other each time. This makes 4 different matrices in total:
+atrial.skin.not.exposed <- c(18, 19, 25, 27, 35)
+atrial.skin.exposed <- c(18, 19, 25, 27, 36)
+ventricle.skin.not.exposed <- c(18, 19, 26, 27, 35)
+ventricle.skin.exposed <- c(18, 19, 26, 27, 36)
+which(sum(lfsr[,atrial.skin.not.exposed]<0.05)==1)
+
+#Function to extract single-tissue eQTL from an lfsr matrix, on only a subset of the tissues.
+single.tissue.eQTLs <- function(desired.tissues, lfsr.threshold=0.05, lfsr.matrix=lfsr){
+  final.mat <- matrix(NA, ncol = 2)
+  colnames(final.mat) <- c("Gene", "Tissue")
+  for(row in 1:nrow(lfsr.matrix)){
+    if(sum(lfsr.matrix[row, desired.tissues]<=lfsr.threshold)==1){
+      final.mat <- rbind(final.mat, c(rownames(lfsr.matrix[row,]), colnames(lfsr.matrix[desired.tissues[which(lfsr.matrix[row, desired.tissues]<=lfsr.threshold)]])))
+    }
+  }
+  return(final.mat[-1,])
+}
+
+#Calling to find tissue-specific eQTL in each of the tissue subgroupings.
+atrial.skin.not.exposed.eQTLs <- single.tissue.eQTLs(atrial.skin.not.exposed)
+atrial.skin.exposed.eQTLs <- single.tissue.eQTLs(atrial.skin.exposed)
+ventricle.skin.not.exposed.eQTLs <- single.tissue.eQTLs(ventricle.skin.not.exposed)
+ventricle.skin.exposed.eQTLs <- single.tissue.eQTLs(ventricle.skin.exposed)
+
+#Binding them all together and removing duplicates, leaving me with only the tissue-specific eQTL.
+tissue.specific.eQTLs <- rbind(atrial.skin.not.exposed.eQTLs, atrial.skin.exposed.eQTLs, ventricle.skin.exposed.eQTLs, ventricle.skin.not.exposed.eQTLs)
+tissue.specific.eQTLs <- unique(tissue.specific.eQTLs) #Extracted all of the genes that have significant lfsr in only one of the desired tissues (or in both types of that tissue).
+
+#Function that finds tissue-specific eQTL from my previously made list with strong effect size, by indexing into the pmash beta matrix to check their beta in that tissue.
+lonely.strong.eQTL <- function(lonely.eQTLs, β.matrix, β.strong){
+  final.mat <- matrix(NA, ncol = 3)
+  colnames(final.mat) <- c("Gene", "Tissue", "Effect Size")
+  for(eQTL in 1:nrow(lonely.eQTLs)){
+    if(β.matrix[lonely.eQTLs[eQTL, 1], lonely.eQTLs[eQTL, 2]]>=β.strong){
+      final.mat <- rbind(final.mat, c(lonely.eQTLs[eQTL, 1], lonely.eQTLs[eQTL, 2], β.matrix[lonely.eQTLs[eQTL, 1], lonely.eQTLs[eQTL, 2]]))
+    }
+  }
+  return(final.mat[-1,])
+}
+
+lonely.strong.eQTL(tissue.specific.eQTLs, pmash, 8)
+
+tissue.betas <- pmash[,desired.tissues] #Make new matrix of effect sizes, only for desired tissues.
+tissue.expr.lvls <- exp.sort[,desired.tissues] #Make a new matrix of expression values, only for desired tissues.
+tissue.LFSRs <- lfsr[,desired.tissues] #Make a new matrix of tissue LFSRs, only for desired tissues.
+library("limma")
+
+
+
+single.tissue.eQTL <- function(β.matrix, upper.β, lower.β){#, lfsr.matrix, lfsr.threshold){
+  index <- 1 #Initialize index for iterating through new.rows.
+  new.rows <- NULL #Initialize new rows vector.
+  for(row in 1:nrow(β.matrix)){ #Iterate through all eQTL
+    if(sum(abs(β.matrix[row,])>=upper.β)>=1 & sum(abs(β.matrix[row,])<=lower.β)>=1){# & sum(lfsr.matrix[row,]>lfsr.threshold)>=1){ #Only look if there's at least one tissue with beta greater than desired, and at least one tissue close enough to 0 based on threshold (and at least one tissue where the beta is insignificant based on lsfr). Change all values to absolute values to not have to worry about + or - effect sizes.
+        new.rows[index] <- row #If criteria are met, save the number of this row for the new.rows vector.
+        index <- index+1
+        }
+      }
+  return(β.matrix[new.rows,])# <- (β.matrix[new.rows,]) #Re-assigns the matrix to only contain the rows of interest from above-specified criteria
+}
+
+my.genes <- single.tissue.eQTL(tissue.betas, 16, 0.4)
+genes <- gsub("_.*$", "", x=rownames(my.genes))
+
+interesting.genes <- matrix(data=NA, nrow=nrow(my.genes), ncol=7)
+colnames(interesting.genes) <- c("High β Tissue", "High Expression", "High LFSR", "Low β Tissue", "Low Expression", "Low LFSR", "Differentially expressed b/t tissues?")
+rownames(interesting.genes) <- rownames(my.genes)
+for(gene in rownames(my.genes)){
+  interesting.genes[gene,1] <- colnames(my.genes)[which.max(my.genes[gene,])]
+  interesting.genes[gene,4] <- colnames(my.genes)[which.min(my.genes[gene,])]
+  interesting.genes[gene,2] <- tissue.expr.lvls[gsub("_.*$", "", gene), interesting.genes[gene,1]]
+  interesting.genes[gene,5] <- tissue.expr.lvls[gsub("_.*$", "", gene), interesting.genes[gene,4]]
+  interesting.genes[gene,3] <- lfsr[gene, interesting.genes[gene,1]]
+  interesting.genes[gene,6] <- lfsr[gene, interesting.genes[gene,4]]
+  #interesting.genes[gene,7]
+}
+
+final.genes <- matrix(data=NA, nrow=, ncol=3)
+colnames(final.genes) <- c("High β Tissue", "Low β Tissue", "Differentially Expressed p-val")
+for(specific.eQTL in specific.eQTLs){
+  colnames(pmash)[desired.tissues]
+}
+
+liver.specific <- read.table("./Archive/LiverSpecific.txt", skip=1)
+fibroblast.specific <- read.table("./Archive/Cells_Transformed_fibroblastsSpecific.txt", skip=1)
+LCL.specific <- read.table("./Archive/Cells_EBV.transformed_lymphocytesSpecific.txt", skip=1)
+
+sample_attributes=read.delim("~/Desktop/eQTL/GTEx_Data_V6_Annotations_SampleAttributesDS.txt",sep="\t")
+ngenes=1000
+test=read.table("~/Desktop/eQTL/GTEx_Analysis_v6_RNA-seq_RNA-SeQCv1.1.8_gene_rpkm.gct.gz",header=TRUE,skip = 2)
+library(reshape2)
+x <- melt(test)
+x$variable <- gsub("\\.", "-", x$variable)
+merged.by.sample=merge(x, sample_attributes, by.x = "variable", by.y = "SAMPID")
+
+
+
+tissue.expr.lvls[genes,]
+
+not.DE.checker <- function(β.matrix, expr.matrix, expr.cutoff){
+  for(gene in rownames(β.matrix)){
+    
+  }
+}
+
+
+#Garbage.
+effect.sizes <- 15:22
+lower.betas <- seq(.1, .5, .1)
+num.single.eQTLs <- matrix(NA, nrow=length(effect.sizes), ncol=length(lower.betas))
+rownames(num.single.eQTLs) <- effect.sizes
+colnames(num.single.eQTLs) <- lower.betas
+for(effect in effect.sizes){
+  for(lower.beta in lower.betas){
+    num.single.eQTLs[as.character(effect), as.character(lower.beta)] <- dim(single.tissue.eQTL(pmash, effect, lower.beta))[1]
+  }
+}
+plot(num.single.eQTLs, main="Number of Single Tissue eQTL | at or above β", xlab="β", ylab="# Single Tissue eQTL", type="l") #This plot doesn't look right, should ONLY go down as beta increases.
+```

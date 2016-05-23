@@ -1,0 +1,106 @@
+---
+title: "withjohn"
+output: html_document
+---
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+sample_attributes=read.delim("~/Desktop/eQTL/GTEx_Data_V6_Annotations_SampleAttributesDS.txt",sep="\t")
+#test=read.table("~/Desktop/eQTL/GTEx_Analysis_v6_RNA-seq_RNA-SeQCv1.1.8_gene_rpkm.gct.gz",header=TRUE,skip = 2)
+#test=read.table("~/Desktop/eQTL/Data1/1000genes.txt", header=TRUE, skip=2)
+#real.test <- read.table("~/Desktop/GTEx_Analysis_v6_RNA-seq_RNA-SeQCv1.1.8_gene_rpkm.gct.gz", header=TRUE, skip=2)
+omega <- read.table("~/Desktop/mygenes.txt", header=TRUE, skip=2)
+library(reshape2)
+y <- melt(omega)
+x <- melt(real.test)
+
+my.genes <- c("ENSG00000182247.5", "ENSG00000177963.8", "ENSG00000240849.6", "ENSG00000166923.6", "ENSG00000124107.5", "ENSG00000028839.5", "ENSG00000177791.11")
+my.tissues <- c("Cells - EBV-transformed lymphocytes", "Cells - Transformed fibroblasts", "Heart - Atrial Appendage", "Heart - Left Ventricle", "Liver", "Skin - Sun Exposed (Lower leg)", "Skin - Not Sun Exposed (Suprapubic)")
+
+#Liver test for ENSG00000166923.6:
+inliver <- expression.extractor("ENSG00000166923.6", "Liver")
+inheart <- expression.extractor("ENSG00000166923.6", "Heart - Atrial Appendage")
+inLCLs <- expression.extractor("ENSG00000166923.6", "Cells - EBV-transformed lymphocytes")
+inLV <- expression.extractor("ENSG00000166923.6", "Heart - Left Ventricle")
+
+x <- x[genes]
+#x$variable <- gsub("\\.", "-", x$variable) Pretty irrelevant for what I want...impt for merging below though
+#merged.by.sample=merge(x, sample_attributes, by.x = "variable", by.y = "SAMPID")
+y$variable <- gsub("\\.", "-", y$variable) #Changes the variable names to match the ones on the sample attributes table (just changing .s to -s)
+final.table <- merge(y, sample_attributes, by.x="variable", by.y="SAMPID")
+
+
+expression.extractor <- function(gene, tissue, matrix=final.table){
+  gene.rows <- which(matrix$Name==gene) #Find all the rows with the gene of interest.
+  temp.mat <- matrix[gene.rows,] #Subset the matrix down to only those rows.
+  tissue.rows <- which(temp.mat$SMTSD==tissue) #SMTSD is column w/ tissues. Find all the rows in that subset matrix containing the tissue of interest.
+  temp.mat <- temp.mat[tissue.rows,] #Subset the matrix down to only the rows with the gene and tissue of interest.
+  return(temp.mat$value) #Returns all the expression values for the given gene in the given tissue.
+}
+
+final.DE.checker <- function(gene, tissue.of.interest){
+  tissues <- c("Cells - EBV-transformed lymphocytes", "Cells - Transformed fibroblasts", "Heart - Atrial Appendage", "Heart - Left Ventricle", "Liver", "Skin - Sun Exposed (Lower leg)", "Skin - Not Sun Exposed (Suprapubic)")
+  tissues <- tissues[-which(tissues==tissue.of.interest)]
+  final.mat <- matrix(NA, nrow=1, ncol=length(tissues)+1)
+  rownames(final.mat) <- gene
+  colnames(final.mat) <- c(tissue.of.interest, tissues)
+  impt.tissue.expression <- expression.extractor(gene, tissue.of.interest)
+  for(tissue in tissues){
+    tmp.expression <- expression.extractor(gene, tissue)
+    final.mat[gene, tissue] <- t.test(impt.tissue.expression, tmp.expression, var.equal=TRUE)$p.val
+  }
+  return(final.mat)
+}
+
+my.genes <- c("ENSG00000182247.5", "ENSG00000177963.8", "ENSG00000240849.6", "ENSG00000166923.6", "ENSG00000124107.5", "ENSG00000028839.5", "ENSG00000177791.11")
+
+test1 <- final.DE.checker("ENSG00000182247.5", "Skin - Sun Exposed (Lower leg)")
+final.DE.checker("ENSG00000182247.5", "Skin - Not Sun Exposed (Suprapubic)")
+
+final.DE.checker("ENSG00000177963.8", "Heart - Atrial Appendage")
+final.DE.checker("ENSG00000177963.8", "Heart - Left Ventricle")
+
+final.DE.checker("ENSG00000240849.6", "Skin - Sun Exposed (Lower leg)")
+final.DE.checker("ENSG00000240849.6", "Skin - Not Sun Exposed (Suprapubic)")
+
+final.DE.checker("ENSG00000166923.6", "Liver")
+
+final.DE.checker("ENSG00000124107.5", "Skin - Sun Exposed (Lower leg)")
+final.DE.checker("ENSG00000124107.5", "Skin - Not Sun Exposed (Suprapubic)")
+
+final.DE.checker("ENSG00000028839.5", "Heart - Atrial Appendage")
+final.DE.checker("ENSG00000028839.5", "Heart - Left Ventricle")
+
+final.DE.checker("ENSG00000177791.11", "Heart - Atrial Appendage")
+```
+
+
+```{r Sarah stuff}
+install.packages("dplyr")
+library('dplyr')
+
+mean.per.tissue = merged.by.sample %>% group_by(SMTSD,Name) %>%mutate(mean = mean(value))
+
+mean.per.tissue = merged.by.sample %>% group_by(SMTSD,Name) %>% summarise(genemean= mean(value)) %>% arrange(SMTSD)
+##convert to genes by tissues
+m=data.frame(spread(mean.per.tissue,key=SMTSD,value=genemean))
+rownames(m)=as.character(m$Name);m=m[,-1]
+
+library('dplyr')
+something <- merged.by.sample %>% group_by(SMTSD, Name)
+```
+
+```{r Garbage}
+genes.rows <- matrix(NA, nrow=length(my.genes)) #Subset down to just the genes of interest from that giant table...
+rownames(genes.rows) <- my.genes
+for(gene in my.genes){
+  gene.rows.vec <-grep(gene, x$Name)
+  for(row in 1:length(gene.rows.vec)){
+    genes.rows[gene, row] <- gene.rows.vec[row]
+  }
+}
+```
+
